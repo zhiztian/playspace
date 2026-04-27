@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>Piano Falling Notes - 原型</title>
+<script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <style>
   * { box-sizing: border-box; }
 
@@ -109,6 +110,7 @@
 <div id="status">
   <span id="midi-status">MIDI: 未连接</span>
   <span id="device-name"></span>
+  <span id="audio-status">音色: 加载中…</span>
   <button id="start">▶ 开始</button>
   <span id="score">分数: 0  |  Hit: 0  Miss: 0</span>
 </div>
@@ -590,38 +592,55 @@ function updateScore() {
   document.getElementById('score').textContent = `分数: ${score}  |  Hit: ${hits}  Miss: ${misses}`;
 }
 
-// ---------- 音频合成 (简易钢琴音色) ----------
-let audioCtx = null;
-const voices = new Map(); // midi -> {osc, gain}
-function ensureAudio() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+// ---------- 音频 (Salamander Grand Piano 采样) ----------
+let piano = null;
+let pianoLoaded = false;
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const midiToNoteName = (m) => NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1);
+const audioStatusEl = document.getElementById('audio-status');
+
+function initPiano() {
+  if (piano) return;
+  // 加一点混响, 让钢琴更有空间感
+  const reverb = new Tone.Reverb({ decay: 2.2, wet: 0.18 }).toDestination();
+  piano = new Tone.Sampler({
+    urls: {
+      A0: "A0.mp3", C1: "C1.mp3", "D#1": "Ds1.mp3", "F#1": "Fs1.mp3", A1: "A1.mp3",
+      C2: "C2.mp3", "D#2": "Ds2.mp3", "F#2": "Fs2.mp3", A2: "A2.mp3",
+      C3: "C3.mp3", "D#3": "Ds3.mp3", "F#3": "Fs3.mp3", A3: "A3.mp3",
+      C4: "C4.mp3", "D#4": "Ds4.mp3", "F#4": "Fs4.mp3", A4: "A4.mp3",
+      C5: "C5.mp3", "D#5": "Ds5.mp3", "F#5": "Fs5.mp3", A5: "A5.mp3",
+      C6: "C6.mp3", "D#6": "Ds6.mp3", "F#6": "Fs6.mp3", A6: "A6.mp3",
+      C7: "C7.mp3", "D#7": "Ds7.mp3", "F#7": "Fs7.mp3", A7: "A7.mp3",
+      C8: "C8.mp3"
+    },
+    release: 1.2,
+    baseUrl: "https://tonejs.github.io/audio/salamander/",
+    onload: () => {
+      pianoLoaded = true;
+      audioStatusEl.textContent = '音色: 已加载';
+      audioStatusEl.className = 'ok';
+    },
+    onerror: (e) => {
+      audioStatusEl.textContent = '音色: 加载失败 (检查网络)';
+      audioStatusEl.className = 'err';
+    }
+  }).connect(reverb);
 }
-const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
+// 立即开始下载采样, 不等用户点 Start
+initPiano();
+
+function ensureAudio() {
+  if (typeof Tone !== 'undefined' && Tone.context.state !== 'running') Tone.start();
+}
+
 function audioOn(midi, velocity = 0.6) {
-  if (!audioCtx) return;
-  audioOff(midi); // 重复按下时先停掉旧的
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  osc.type = 'triangle';
-  osc.frequency.value = midiToFreq(midi);
-  osc.connect(gain).connect(audioCtx.destination);
-  const t = audioCtx.currentTime;
-  const peak = velocity * 0.25;
-  gain.gain.setValueAtTime(0, t);
-  gain.gain.linearRampToValueAtTime(peak, t + 0.005);                    // attack
-  gain.gain.exponentialRampToValueAtTime(peak * 0.4, t + 0.4);           // decay -> sustain
-  osc.start(t);
-  voices.set(midi, { osc, gain });
+  if (!piano || !pianoLoaded) return;
+  piano.triggerAttack(midiToNoteName(midi), undefined, Math.max(0.05, Math.min(1, velocity)));
 }
 function audioOff(midi) {
-  const v = voices.get(midi); if (!v) return;
-  const t = audioCtx.currentTime;
-  v.gain.gain.cancelScheduledValues(t);
-  v.gain.gain.setValueAtTime(v.gain.gain.value, t);
-  v.gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);            // release
-  v.osc.stop(t + 0.26);
-  voices.delete(midi);
+  if (!piano || !pianoLoaded) return;
+  piano.triggerRelease(midiToNoteName(midi));
 }
 
 // ---------- MIDI ----------
