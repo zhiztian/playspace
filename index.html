@@ -3,7 +3,6 @@
 <head>
 <meta charset="UTF-8">
 <title>Piano Falling Notes - 原型</title>
-<script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
 <style>
   * { box-sizing: border-box; }
 
@@ -209,6 +208,68 @@ function draw() {
     ctx.lineTo(x, y + r);
     ctx.quadraticCurveTo(x, y, x + r, y);
     ctx.closePath();
+  };
+
+  // 实体键帽样式: 圆角 + 上亮下暗渐变 + 顶部高光 + 阴影
+  const drawKeyCap = (cx, cy, label, down, sizeHint) => {
+    const cw = Math.min(20, Math.max(13, sizeHint));
+    const ch = cw;
+    const cr = 4;
+    const cx0 = Math.round(cx - cw / 2);
+    const cy0 = Math.round(cy - ch / 2);
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.45)';
+    ctx.shadowBlur = 4;
+    ctx.shadowOffsetY = 1.5;
+    const grad = ctx.createLinearGradient(0, cy0, 0, cy0 + ch);
+    if (down) {
+      grad.addColorStop(0, '#fff7d6');
+      grad.addColorStop(0.55, '#fde047');
+      grad.addColorStop(1, '#d97706');
+    } else {
+      grad.addColorStop(0, '#475569');
+      grad.addColorStop(0.55, '#1e293b');
+      grad.addColorStop(1, '#0b1220');
+    }
+    roundedRect(cx0, cy0, cw, ch, cr);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.restore();
+
+    roundedRect(cx0, cy0, cw, ch, cr);
+    ctx.strokeStyle = down ? 'rgba(146, 64, 14, 0.85)' : 'rgba(2, 6, 23, 0.85)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // 顶部高光带
+    ctx.save();
+    roundedRect(cx0 + 1, cy0 + 1, cw - 2, ch - 2, cr - 1);
+    ctx.clip();
+    const hl = ctx.createLinearGradient(0, cy0, 0, cy0 + ch * 0.55);
+    hl.addColorStop(0, down ? 'rgba(255,255,255,0.75)' : 'rgba(203, 213, 225, 0.45)');
+    hl.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = hl;
+    ctx.fillRect(cx0, cy0, cw, ch * 0.55);
+    // 底部反光
+    const bot = ctx.createLinearGradient(0, cy0 + ch * 0.7, 0, cy0 + ch);
+    bot.addColorStop(0, 'rgba(0,0,0,0)');
+    bot.addColorStop(1, down ? 'rgba(120, 53, 15, 0.45)' : 'rgba(0,0,0,0.35)');
+    ctx.fillStyle = bot;
+    ctx.fillRect(cx0, cy0 + ch * 0.7, cw, ch * 0.3);
+    ctx.restore();
+
+    // 字母
+    const fontSize = Math.round(cw * 0.55);
+    ctx.font = `700 ${fontSize}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    // 文字阴影
+    ctx.fillStyle = down ? 'rgba(120, 53, 15, 0.55)' : 'rgba(0,0,0,0.55)';
+    ctx.fillText(label, cx, cy + 1.5);
+    // 文字本体
+    ctx.fillStyle = down ? '#3b1207' : '#f1f5f9';
+    ctx.fillText(label, cx, cy);
   };
 
   const bottomRoundRect = (x, y, w, h, r) => {
@@ -491,6 +552,12 @@ function draw() {
       ctx.fillText('C' + (Math.floor(m / 12) - 1), k.x + 5, hitLineY + KEYBOARD_HEIGHT - 9);
       ctx.restore();
     }
+
+    // 电脑键盘字母 keycap (白键)
+    const label = MIDI_TO_KEY_LABEL[m];
+    if (label && k.w > 14) {
+      drawKeyCap(k.x + k.w / 2, hitLineY + KEYBOARD_HEIGHT - 22, label, down, k.w * 0.55);
+    }
   }
 
   // Black keys on top
@@ -547,6 +614,12 @@ function draw() {
     ctx.fillRect(keyX + 2, keyY + keyH - 8, keyW - 4, 6);
 
     ctx.restore();
+
+    // 电脑键盘字母 keycap (黑键, 位置在黑键下端略上)
+    const blabel = MIDI_TO_KEY_LABEL[m];
+    if (blabel && k.w > 12) {
+      drawKeyCap(k.x + k.w / 2, hitLineY + keyH - 12, blabel, down, k.w * 0.85);
+    }
   }
 
   ctx.globalAlpha = 1;
@@ -592,55 +665,47 @@ function updateScore() {
   document.getElementById('score').textContent = `分数: ${score}  |  Hit: ${hits}  Miss: ${misses}`;
 }
 
-// ---------- 音频 (Salamander Grand Piano 采样) ----------
+// ---------- 音频 (smplr SplendidGrandPiano - Yamaha C5 多力度层立体声) ----------
 let piano = null;
 let pianoLoaded = false;
-const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-const midiToNoteName = (m) => NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1);
+let audioContext = null;
 const audioStatusEl = document.getElementById('audio-status');
 
-function initPiano() {
+async function initPiano() {
   if (piano) return;
-  // 加一点混响, 让钢琴更有空间感
-  const reverb = new Tone.Reverb({ decay: 2.2, wet: 0.18 }).toDestination();
-  piano = new Tone.Sampler({
-    urls: {
-      A0: "A0.mp3", C1: "C1.mp3", "D#1": "Ds1.mp3", "F#1": "Fs1.mp3", A1: "A1.mp3",
-      C2: "C2.mp3", "D#2": "Ds2.mp3", "F#2": "Fs2.mp3", A2: "A2.mp3",
-      C3: "C3.mp3", "D#3": "Ds3.mp3", "F#3": "Fs3.mp3", A3: "A3.mp3",
-      C4: "C4.mp3", "D#4": "Ds4.mp3", "F#4": "Fs4.mp3", A4: "A4.mp3",
-      C5: "C5.mp3", "D#5": "Ds5.mp3", "F#5": "Fs5.mp3", A5: "A5.mp3",
-      C6: "C6.mp3", "D#6": "Ds6.mp3", "F#6": "Fs6.mp3", A6: "A6.mp3",
-      C7: "C7.mp3", "D#7": "Ds7.mp3", "F#7": "Fs7.mp3", A7: "A7.mp3",
-      C8: "C8.mp3"
-    },
-    release: 1.2,
-    baseUrl: "https://tonejs.github.io/audio/salamander/",
-    onload: () => {
-      pianoLoaded = true;
-      audioStatusEl.textContent = '音色: 已加载';
-      audioStatusEl.className = 'ok';
-    },
-    onerror: (e) => {
-      audioStatusEl.textContent = '音色: 加载失败 (检查网络)';
-      audioStatusEl.className = 'err';
-    }
-  }).connect(reverb);
+  audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  try {
+    audioStatusEl.textContent = '音色: 下载采样中…';
+    const { SplendidGrandPiano, Reverb } = await import('https://esm.sh/smplr@0.20.0');
+    piano = new SplendidGrandPiano(audioContext);
+    await piano.load;
+    // 加一点厅堂混响
+    try {
+      const reverb = new Reverb(audioContext, { decay: 2.5, wet: 0.18 });
+      piano.output.addEffect('reverb', reverb, 0.18);
+    } catch (e) { /* 可选, 加不上不影响发声 */ }
+    pianoLoaded = true;
+    audioStatusEl.textContent = '音色: 已加载 (Yamaha C5)';
+    audioStatusEl.className = 'ok';
+  } catch (e) {
+    audioStatusEl.textContent = '音色: 加载失败 (' + (e.message || e) + ')';
+    audioStatusEl.className = 'err';
+  }
 }
-// 立即开始下载采样, 不等用户点 Start
 initPiano();
 
 function ensureAudio() {
-  if (typeof Tone !== 'undefined' && Tone.context.state !== 'running') Tone.start();
+  if (audioContext && audioContext.state === 'suspended') audioContext.resume();
 }
 
 function audioOn(midi, velocity = 0.6) {
   if (!piano || !pianoLoaded) return;
-  piano.triggerAttack(midiToNoteName(midi), undefined, Math.max(0.05, Math.min(1, velocity)));
+  const v = Math.round(Math.max(0.05, Math.min(1, velocity)) * 127);
+  piano.start({ note: midi, velocity: v });
 }
 function audioOff(midi) {
   if (!piano || !pianoLoaded) return;
-  piano.triggerRelease(midiToNoteName(midi));
+  piano.stop(midi);
 }
 
 // ---------- MIDI ----------
@@ -688,6 +753,8 @@ function onMidi(ev) {
 
 // 键盘当 MIDI 测试 (没有电钢时也能玩): A S D F G H J = C D E F G A B
 const KEY_MAP = { a: 60, w: 61, s: 62, e: 63, d: 64, f: 65, t: 66, g: 67, y: 68, h: 69, u: 70, j: 71, k: 72 };
+const MIDI_TO_KEY_LABEL = {};
+for (const [k, m] of Object.entries(KEY_MAP)) MIDI_TO_KEY_LABEL[m] = k.toUpperCase();
 window.addEventListener('keydown', (e) => {
   const m = KEY_MAP[e.key]; if (!m || e.repeat) return;
   ensureAudio();
