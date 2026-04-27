@@ -111,6 +111,8 @@
   <span id="device-name"></span>
   <span id="audio-status">音色: 加载中…</span>
   <button id="start">▶ 开始</button>
+  <button id="pause" style="display:none">⏸ 暂停</button>
+  <button id="restart" style="display:none">↻ 重新开始</button>
   <span id="score">分数: 0  |  Hit: 0  Miss: 0</span>
 </div>
 
@@ -142,6 +144,7 @@ const SONG = [
 ];
 const BEAT_SEC = 0.5;
 const NOTES = SONG.map(([m, b, d]) => ({ midi: m, t: b * BEAT_SEC, dur: d * BEAT_SEC, hit: false, missed: false }));
+const SONG_END_TIME = NOTES.reduce((mx, n) => Math.max(mx, n.t + n.dur), 0);
 
 // ---------- 键盘几何 ----------
 const BLACK_SET = new Set([1, 3, 6, 8, 10]); // 半音里的黑键 (C=0)
@@ -181,17 +184,24 @@ resize();
 
 const pressed = new Set(); // 当前按下的 midi 键
 let started = false;
+let paused = false;
+let pauseTime = 0;       // 暂停时记录的游戏时间
 let startTime = 0;
 let score = 0, hits = 0, misses = 0;
 
 function midiInRange(m) { return m >= FIRST_MIDI && m <= LAST_MIDI; }
+function gameTime() {
+  if (!started) return -FALL_SECONDS;
+  if (paused) return pauseTime;
+  return performance.now() / 1000 - startTime;
+}
 
 function draw() {
   const W = canvas.width, H = canvas.height;
   const hitLineY = H - KEYBOARD_HEIGHT;
   const fallH = hitLineY;
   const pxPerSec = fallH / FALL_SECONDS;
-  const now = started ? (performance.now() / 1000 - startTime) : -FALL_SECONDS;
+  const now = gameTime();
 
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
@@ -633,7 +643,8 @@ requestAnimationFrame(draw);
 
 // ---------- 判定 ----------
 function tryHit(midi) {
-  const now = performance.now() / 1000 - startTime;
+  if (paused) return;
+  const now = gameTime();
   // 找最近的未命中音符 (容差窗口内)
   let best = null, bestDt = Infinity;
   for (const n of NOTES) {
@@ -650,15 +661,23 @@ function tryHit(midi) {
   updateScore();
 }
 
-// 标记错过的音符
+// 周期扫描: 1) 长按命中 (避免按住一个键时同音重复音符漏判) 2) 错过标记 3) 终曲检测
 setInterval(() => {
-  if (!started) return;
-  const now = performance.now() / 1000 - startTime;
+  if (!started || paused) return;
+  const now = gameTime();
   for (const n of NOTES) {
-    if (!n.hit && !n.missed && n.t < now - HIT_WINDOW_MS / 1000) {
+    if (n.hit || n.missed) continue;
+    const dt = (n.t - now) * 1000; // 单位 ms; 负 = 已过判定线
+    if (Math.abs(dt) <= HIT_WINDOW_MS && pressed.has(n.midi)) {
+      // 在窗口内, 且键正按着 -> 自动命中 (同音长按场景)
+      n.hit = true; hits++;
+      score += Math.round(100 - Math.abs(dt));
+      updateScore();
+    } else if (dt < -HIT_WINDOW_MS) {
       n.missed = true; misses++; updateScore();
     }
   }
+  if (now > SONG_END_TIME + 1.5) finishSong();
 }, 100);
 
 function updateScore() {
@@ -675,13 +694,19 @@ async function initPiano() {
   if (piano) return;
   audioContext = new (window.AudioContext || window.webkitAudioContext)();
   try {
-    audioStatusEl.textContent = '音色: 下载采样中… 0%';
-    const { SplendidGrandPiano, Reverb } = await import('https://esm.sh/smplr@0.20.0');
+    audioStatusEl.textContent = '音色: 检查缓存…';
+    const { SplendidGrandPiano, Reverb, CacheStorage } = await import('https://esm.sh/smplr@0.20.0');
+    // CacheStorage 用浏览器 Cache API 持久化采样, 第二次起从本地秒开
+    // (仅 https 或 localhost 生效, file:// 协议下会回退到内存)
+    let storage;
+    try { storage = new CacheStorage(); } catch (e) { storage = undefined; }
     piano = new SplendidGrandPiano(audioContext, {
+      storage,
       onLoadProgress: ({ loaded, total }) => {
         if (pianoLoaded) return;
         const pct = total > 0 ? Math.floor((loaded / total) * 100) : 0;
-        audioStatusEl.textContent = `音色: 下载采样中… ${pct}% (${loaded}/${total})`;
+        const fromCache = storage ? '' : ' (无缓存)';
+        audioStatusEl.textContent = `音色: 加载中… ${pct}% (${loaded}/${total})${fromCache}`;
       }
     });
     await piano.load;
@@ -771,14 +796,54 @@ window.addEventListener('keyup', (e) => {
   pressed.delete(m); audioOff(m);
 });
 
-// ---------- 开始 ----------
-document.getElementById('start').onclick = () => {
+// ---------- 开始 / 暂停 / 重新开始 ----------
+const btnStart = document.getElementById('start');
+const btnPause = document.getElementById('pause');
+const btnRestart = document.getElementById('restart');
+
+function beginPlay() {
   ensureAudio();
-  // 重置
+  // 静音并清空所有按键状态 — 避免重新开始时旧音卡住或键面常亮
+  for (const m of [...pressed]) audioOff(m);
+  pressed.clear();
   for (const n of NOTES) { n.hit = false; n.missed = false; }
   score = 0; hits = 0; misses = 0; updateScore();
   started = true;
-  startTime = performance.now() / 1000 + FALL_SECONDS; // 让第一个音符从顶端开始下落
+  paused = false;
+  startTime = performance.now() / 1000 + FALL_SECONDS; // 第一个音符从顶端开始落
+  btnStart.style.display = 'none';
+  btnPause.style.display = '';
+  btnPause.textContent = '⏸ 暂停';
+  btnRestart.style.display = '';
+}
+
+function finishSong() {
+  started = false;
+  paused = false;
+  // 不清 pressed: 用户可能还在弹琴, 让 keyup/noteoff 自然清掉
+  btnStart.style.display = '';
+  btnPause.style.display = 'none';
+  btnPause.textContent = '⏸ 暂停';
+  btnRestart.style.display = 'none';
+}
+
+btnStart.onclick = beginPlay;
+btnRestart.onclick = beginPlay;
+
+btnPause.onclick = () => {
+  if (!started) return;
+  if (!paused) {
+    pauseTime = performance.now() / 1000 - startTime;
+    paused = true;
+    btnPause.textContent = '▶ 继续';
+    // 静音并清空按键 — 防止暂停期间键面常亮 / 恢复后重复 keydown 失败
+    for (const m of [...pressed]) audioOff(m);
+    pressed.clear();
+  } else {
+    startTime = performance.now() / 1000 - pauseTime;
+    paused = false;
+    btnPause.textContent = '⏸ 暂停';
+  }
 };
 </script>
 </body>
