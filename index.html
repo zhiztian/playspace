@@ -675,9 +675,15 @@ async function initPiano() {
   if (piano) return;
   audioContext = new (window.AudioContext || window.webkitAudioContext)();
   try {
-    audioStatusEl.textContent = '音色: 下载采样中…';
+    audioStatusEl.textContent = '音色: 下载采样中… 0%';
     const { SplendidGrandPiano, Reverb } = await import('https://esm.sh/smplr@0.20.0');
-    piano = new SplendidGrandPiano(audioContext);
+    piano = new SplendidGrandPiano(audioContext, {
+      onLoadProgress: ({ loaded, total }) => {
+        if (pianoLoaded) return;
+        const pct = total > 0 ? Math.floor((loaded / total) * 100) : 0;
+        audioStatusEl.textContent = `音色: 下载采样中… ${pct}% (${loaded}/${total})`;
+      }
+    });
     await piano.load;
     // 加一点厅堂混响
     try {
