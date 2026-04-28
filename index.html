@@ -81,6 +81,13 @@
     filter: brightness(0.96);
   }
 
+  button:disabled {
+    cursor: not-allowed;
+    filter: grayscale(0.5) brightness(0.55);
+    box-shadow: none;
+  }
+  button:disabled:hover { transform: none; filter: grayscale(0.5) brightness(0.55); }
+
   select {
     appearance: none;
     -webkit-appearance: none;
@@ -403,7 +410,24 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-const pressed = new Set(); // 当前按下的 midi 键
+// 引用计数 Map: midi -> 持有数. 物理键 + Yamaha + 黑键修饰组合可能让同一 midi 被多源持有,
+// 用 Set 会让先松开的那只手把另一只手的音也掐掉.
+const pressed = new Map();
+function noteOn(midi, velocity = 0.6) {
+  const c = (pressed.get(midi) || 0) + 1;
+  pressed.set(midi, c);
+  if (c === 1) audioOn(midi, velocity);
+}
+function noteOff(midi) {
+  const c = pressed.get(midi);
+  if (!c) return;
+  if (c <= 1) { pressed.delete(midi); audioOff(midi); }
+  else pressed.set(midi, c - 1);
+}
+function releaseAllHeld() {
+  for (const midi of pressed.keys()) audioOff(midi);
+  pressed.clear();
+}
 let started = false;
 let paused = false;
 let pauseTime = 0;       // 暂停时记录的游戏时间
@@ -939,6 +963,8 @@ async function initPiano() {
     pianoLoaded = true;
     audioStatusEl.textContent = '音色: 已加载 (Yamaha C5)';
     audioStatusEl.className = 'ok';
+    if (typeof btnStart !== 'undefined') btnStart.disabled = false;
+    if (typeof btnRestart !== 'undefined') btnRestart.disabled = false;
   } catch (e) {
     audioStatusEl.textContent = '音色: 加载失败 (' + (e.message || e) + ')';
     audioStatusEl.className = 'err';
@@ -975,6 +1001,8 @@ if (!navigator.requestMIDIAccess) {
         midiStatus.textContent = 'MIDI: 未检测到设备';
         midiStatus.className = 'err';
         deviceName.textContent = '';
+        // 拔掉琴时把所有 Yamaha 来源的卡音放掉 (key 输入仍由 activeKeys 单独管理)
+        releaseAllHeld();
       } else {
         midiStatus.textContent = 'MIDI: 已连接';
         midiStatus.className = 'ok';
@@ -994,77 +1022,169 @@ function onMidi(ev) {
   const [status, data1, data2] = ev.data;
   const cmd = status & 0xf0;
   if (cmd === 0x90 && data2 > 0) { // note on
-    pressed.add(data1);
-    audioOn(data1, data2 / 127);
+    noteOn(data1, data2 / 127);
     if (started) tryHit(data1);
   } else if (cmd === 0x80 || (cmd === 0x90 && data2 === 0)) { // note off
-    pressed.delete(data1);
-    audioOff(data1);
+    noteOff(data1);
   }
 }
 
 // 电脑键盘当 MIDI 测试 (没有电钢时也能玩):
-//   家位:   a s d f j k l ;  →  C4 D4 E4 F4 G4 A4 B4 C5  (中央八度 8 个白键)
-//   Ctrl+: 同样的键           →  C3 D3 E3 F3 G3 A3 B3 C4  (低八度)
-//   空格:                     →  C5  (高音 C 快捷键)
+//   家位:        a s d f j k l ;       →  C4 D4 E4 F4 G4 A4 B4 C5  (中央八度白键)
+//   Ctrl + 同样: a s d f j k l          →  C3 D3 E3 F3 G3 A3 B3    (低八度白键)
+//   空格 + 同样: a s   f j k     ;      →  C#4 D#4 F#4 G#4 A#4 C#5 (黑键)
+//   Ctrl+空格+   a s   f j k            →  C#3 D#3 F#3 G#3 A#3     (低八度黑键)
+//   单按 空格:                          →  C5 (空格按下时本身也响 C5)
 // 用 e.code 而不是 e.key, 避免 Shift/CapsLock/输入法干扰映射.
-// 全部按键都 preventDefault, 抑制浏览器快捷键 (Ctrl+S 保存, Ctrl+A 全选,
-// Ctrl+J 下载, Ctrl+L 地址栏, Space 滚动等). Ctrl+W/T/N 等不可拦截的不在映射中.
+// 焦点保护: 拦截所有 Ctrl/Alt/Meta + 其他键 的组合 + Tab, 防止浏览器快捷键
+// (Ctrl+F 查找 / Ctrl+S 保存 / Ctrl+L 地址栏 / Tab 切焦点) 把焦点偷走.
+// Ctrl+W/T/N、F5、F11、F12 是浏览器/OS 级, 无法拦截.
 const CODE_TO_BASE_MIDI = {
   KeyA: 60, KeyS: 62, KeyD: 64, KeyF: 65,
   KeyJ: 67, KeyK: 69, KeyL: 71, Semicolon: 72,
-  Space: 72,
 };
 const CODE_LABEL = {
   KeyA: 'A', KeyS: 'S', KeyD: 'D', KeyF: 'F',
   KeyJ: 'J', KeyK: 'K', KeyL: 'L', Semicolon: ';',
 };
+// 黑键 = 该字母右侧紧邻的黑键 (升半音). E (D键) 和 B (L键) 右侧无黑键, 跳过.
+const BLACK_KEY_OFFSET = {
+  KeyA: 1, KeyS: 1, KeyF: 1, KeyJ: 1, KeyK: 1, Semicolon: 1,
+};
+// Space 单独处理: 单按 = C5, 与字母组合 = 升黑键修饰
 
 const MIDI_TO_KEY_LABEL = {};
+// 主八度白键
 for (const [code, lbl] of Object.entries(CODE_LABEL)) {
   MIDI_TO_KEY_LABEL[CODE_TO_BASE_MIDI[code]] = lbl;
 }
-// 低八度标签; Ctrl+; 落在 C4 已被 A 占用, 跳过避免覆盖
+MIDI_TO_KEY_LABEL[72] = MIDI_TO_KEY_LABEL[72] || '␣'; // C5 = ;/Space
+// 低八度白键 (⌃A 等); ⌃; 落在 C4 与 A 冲突, 跳过
 for (const [code, lbl] of Object.entries(CODE_LABEL)) {
   const m = CODE_TO_BASE_MIDI[code] - 12;
   if (!(m in MIDI_TO_KEY_LABEL)) MIDI_TO_KEY_LABEL[m] = '⌃' + lbl;
 }
+// 主八度黑键 (␣ = 空格符号)
+for (const [code, off] of Object.entries(BLACK_KEY_OFFSET)) {
+  MIDI_TO_KEY_LABEL[CODE_TO_BASE_MIDI[code] + off] = '␣' + CODE_LABEL[code];
+}
+// 低八度黑键 (⌃␣A 等)
+for (const [code, off] of Object.entries(BLACK_KEY_OFFSET)) {
+  const m = CODE_TO_BASE_MIDI[code] - 12 + off;
+  if (!(m in MIDI_TO_KEY_LABEL)) MIDI_TO_KEY_LABEL[m] = '⌃␣' + CODE_LABEL[code];
+}
 
-// 按物理键跟踪正在发声的音 — 用户可能在按住 A 的时候松开 Ctrl,
-// 此时再 keyup KeyA 必须释放最初按下时算出的那个 MIDI, 不能重新算.
-const activeKeys = new Map(); // e.code -> midi
+let spaceHeld = false;
+let spaceUsedAsModifier = false; // 一旦被当作黑键修饰, Space 松开时不再补发 C5
+const activeKeys = new Map(); // e.code -> midi (按下时算出的, 松键时不能重算; Space 也用 'Space' 占位)
+
+function isOurKey(e) {
+  return e.code === 'Space' || e.code in CODE_TO_BASE_MIDI;
+}
+
+function shouldPreventDefault(e) {
+  // 单按修饰键不拦截 (拦了反而可能影响 IME); 其它情况只要带修饰 / Tab / 是我们的映射键就拦
+  const lone = ['ControlLeft','ControlRight','AltLeft','AltRight',
+                'MetaLeft','MetaRight','ShiftLeft','ShiftRight'];
+  if (lone.includes(e.code)) return false;
+  return e.ctrlKey || e.metaKey || e.altKey
+      || e.code === 'Tab'
+      || isOurKey(e);
+}
+
+function maybeStealFocus(e) {
+  // 只在按下"我们的键"时把焦点从按钮 / 下拉框抢回来, 否则 Space/Enter 会重新触发它们
+  // 但用户在 select 上用方向键浏览时就别抢了
+  if (!isOurKey(e)) return;
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'BUTTON' || ae.tagName === 'SELECT')) ae.blur();
+}
 
 window.addEventListener('keydown', (e) => {
+  if (shouldPreventDefault(e)) { e.preventDefault(); e.stopPropagation(); }
+  maybeStealFocus(e);
+  if (e.repeat) return;
+
+  // Space 单独处理: 按下立即响 C5, 但若随后按下字母变成黑键修饰, 则掐掉 C5
+  if (e.code === 'Space') {
+    if (spaceHeld) return;
+    spaceHeld = true;
+    spaceUsedAsModifier = false;
+    activeKeys.set('Space', 72);
+    ensureAudio();
+    noteOn(72, 0.6);
+    if (started) tryHit(72);
+    return;
+  }
+
   const base = CODE_TO_BASE_MIDI[e.code];
   if (base === undefined) return;
-  e.preventDefault();
-  if (e.repeat) return;
   if (activeKeys.has(e.code)) return;
-  // Space 不响应 Ctrl 修饰; 其他键 Ctrl 按下 → 低一八度
-  const midi = (e.code !== 'Space' && e.ctrlKey) ? base - 12 : base;
+
+  // Space + 字母: 第一次组合时, 把刚刚 Space 触发的 C5 取消掉
+  if (spaceHeld && BLACK_KEY_OFFSET[e.code] && !spaceUsedAsModifier) {
+    spaceUsedAsModifier = true;
+    if (activeKeys.has('Space')) {
+      const cancelMidi = activeKeys.get('Space');
+      activeKeys.delete('Space');
+      noteOff(cancelMidi);
+    }
+  }
+
+  let midi = base;
+  if (e.ctrlKey) midi -= 12;
+  if (spaceHeld && BLACK_KEY_OFFSET[e.code]) midi += BLACK_KEY_OFFSET[e.code];
   activeKeys.set(e.code, midi);
   ensureAudio();
-  pressed.add(midi); audioOn(midi, 0.6);
+  noteOn(midi, 0.6);
   if (started) tryHit(midi);
-});
+}, true); // capture: 抢在按钮 / select 默认行为之前
+
 window.addEventListener('keyup', (e) => {
+  if (shouldPreventDefault(e)) { e.preventDefault(); e.stopPropagation(); }
+
+  if (e.code === 'Space') {
+    spaceHeld = false;
+    spaceUsedAsModifier = false;
+    if (activeKeys.has('Space')) {
+      const m = activeKeys.get('Space');
+      activeKeys.delete('Space');
+      noteOff(m);
+    }
+    return;
+  }
+
   const midi = activeKeys.get(e.code);
   if (midi === undefined) return;
-  e.preventDefault();
   activeKeys.delete(e.code);
-  pressed.delete(midi); audioOff(midi);
+  noteOff(midi);
+}, true);
+
+function releaseAllPhysicalInput() {
+  spaceHeld = false;
+  spaceUsedAsModifier = false;
+  for (const midi of activeKeys.values()) noteOff(midi);
+  activeKeys.clear();
+}
+// Alt-Tab 出去 / 标签页隐藏时, 所有按住状态都不可信, 一律松开
+window.addEventListener('blur', releaseAllPhysicalInput);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) releaseAllPhysicalInput();
 });
 
 // ---------- 开始 / 暂停 / 重新开始 ----------
 const btnStart = document.getElementById('start');
 const btnPause = document.getElementById('pause');
 const btnRestart = document.getElementById('restart');
+// 采样还没加载完之前禁用开始 (避免按下后 audioOn 静默 no-op, 玩家以为没声音)
+if (!pianoLoaded) { btnStart.disabled = true; btnRestart.disabled = true; }
 
 function beginPlay() {
+  if (!pianoLoaded) return; // 防御: 按钮也会被 disable, 但双保险
   ensureAudio();
   // 静音并清空所有按键状态 — 避免重新开始时旧音卡住或键面常亮
-  for (const m of [...pressed]) audioOff(m);
-  pressed.clear();
+  releaseAllHeld();
+  releaseAllPhysicalInput();
   for (const n of NOTES) { n.hit = false; n.missed = false; }
   score = 0; hits = 0; misses = 0; updateScore();
   started = true;
@@ -1079,15 +1199,17 @@ function beginPlay() {
 function finishSong() {
   started = false;
   paused = false;
-  // 不清 pressed: 用户可能还在弹琴, 让 keyup/noteoff 自然清掉
+  // 终曲: 把所有还在响的音放掉, 免得采样器尾音一直挂着
+  releaseAllHeld();
+  releaseAllPhysicalInput();
   btnStart.style.display = '';
   btnPause.style.display = 'none';
   btnPause.textContent = '⏸ 暂停';
   btnRestart.style.display = 'none';
 }
 
-btnStart.onclick = beginPlay;
-btnRestart.onclick = beginPlay;
+btnStart.onclick = (e) => { e.currentTarget.blur(); beginPlay(); };
+btnRestart.onclick = (e) => { e.currentTarget.blur(); beginPlay(); };
 
 // ---------- 曲目选择 ----------
 const songSelect = document.getElementById('song-select');
@@ -1100,8 +1222,8 @@ for (const [key, s] of Object.entries(SONGS)) {
 songSelect.value = currentSongKey;
 songSelect.onchange = () => {
   // 切歌: 清按键 / 静音 / 复位到未开始状态
-  for (const m of [...pressed]) audioOff(m);
-  pressed.clear();
+  releaseAllHeld();
+  releaseAllPhysicalInput();
   loadSong(songSelect.value);
   score = 0; hits = 0; misses = 0; updateScore();
   started = false; paused = false;
@@ -1109,17 +1231,19 @@ songSelect.onchange = () => {
   btnPause.style.display = 'none';
   btnPause.textContent = '⏸ 暂停';
   btnRestart.style.display = 'none';
+  songSelect.blur(); // 防止下拉框抢键盘焦点 (字母键会跳到对应选项)
 };
 
-btnPause.onclick = () => {
+btnPause.onclick = (e) => {
+  e.currentTarget.blur();
   if (!started) return;
   if (!paused) {
     pauseTime = performance.now() / 1000 - startTime;
     paused = true;
     btnPause.textContent = '▶ 继续';
     // 静音并清空按键 — 防止暂停期间键面常亮 / 恢复后重复 keydown 失败
-    for (const m of [...pressed]) audioOff(m);
-    pressed.clear();
+    releaseAllHeld();
+    releaseAllPhysicalInput();
   } else {
     startTime = performance.now() / 1000 - pauseTime;
     paused = false;
