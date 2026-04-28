@@ -142,6 +142,87 @@
     width: 100%;
     height: 100%;
   }
+
+  #keymap-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(4, 6, 14, 0.72);
+    backdrop-filter: blur(10px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  #keymap-modal.open { display: flex; }
+  .km-card {
+    background:
+      linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(7, 10, 22, 0.96));
+    border: 1px solid rgba(125, 211, 252, 0.30);
+    border-radius: 16px;
+    padding: 22px 26px 18px;
+    min-width: 360px;
+    max-width: 540px;
+    color: #e0f2fe;
+    box-shadow:
+      0 24px 70px rgba(0, 0, 0, 0.55),
+      0 0 38px rgba(34, 211, 238, 0.16);
+  }
+  .km-card h3 {
+    margin: 0 0 14px 0;
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    color: #f8fafc;
+  }
+  #km-rows {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px 18px;
+    margin-bottom: 14px;
+  }
+  .km-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .km-note {
+    display: inline-block;
+    width: 30px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-weight: 700;
+    color: #cbd5e1;
+    font-size: 13px;
+  }
+  .km-note.black { color: #c084fc; }
+  .km-btn {
+    flex: 1;
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    background: linear-gradient(180deg, rgba(56, 189, 248, 0.85), rgba(37, 99, 235, 0.85));
+    border: 1px solid rgba(125, 211, 252, 0.4);
+    color: #eff6ff;
+    cursor: pointer;
+    text-align: center;
+    box-shadow: none;
+  }
+  .km-btn.waiting {
+    background: linear-gradient(180deg, rgba(250, 204, 21, 0.92), rgba(217, 119, 6, 0.92));
+    color: #1f1306;
+    border-color: rgba(254, 240, 138, 0.6);
+  }
+  .km-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+  }
+  .km-hint {
+    margin: 10px 0 0;
+    font-size: 11px;
+    color: #94a3b8;
+    text-align: center;
+  }
 </style>
 </head>
 <body>
@@ -151,10 +232,24 @@
   <span id="device-name"></span>
   <span id="audio-status">音色: 加载中…</span>
   <select id="song-select" title="选择曲目"></select>
+  <button id="settings" title="键位设置">⚙</button>
   <button id="start">▶ 开始</button>
   <button id="pause" style="display:none">⏸ 暂停</button>
   <button id="restart" style="display:none">↻ 重新开始</button>
   <span id="score">分数: 0  |  Hit: 0  Miss: 0</span>
+</div>
+
+<div id="keymap-modal">
+  <div class="km-card">
+    <h3>键位设置</h3>
+    <div id="km-rows"></div>
+    <div class="km-actions">
+      <button id="km-reset">恢复默认</button>
+      <button id="km-close">关闭</button>
+    </div>
+    <p class="km-hint">点击右侧按钮 → 按下你想绑定的键 (Esc 取消, Backspace 清除)</p>
+    <p class="km-hint">修饰键固定: Ctrl = 降一组 (C3), 空格 = 升一组 (C5)</p>
+  </div>
 </div>
 
 <div id="stage">
@@ -1039,41 +1134,74 @@ function onMidi(ev) {
 // (Ctrl+F 查找 / Ctrl+S 保存 / Ctrl+L 地址栏 / Tab 切焦点) 把焦点偷走.
 // Ctrl+W/T/N、F5、F11、F12 是浏览器/OS 级 keydown 拦不住,
 // 但 Ctrl+W / Ctrl+R / 关 tab / 后退 都会触发 beforeunload, 在那里弹原生确认框.
-const WHITE_CODE_TO_MIDI = {
-  KeyA: 60, KeyS: 62, KeyD: 64, KeyF: 65,
-  KeyJ: 67, KeyK: 69, KeyL: 71,
+// 半音 (0=C, 1=C#, ..., 11=B) -> e.code 的可配置映射
+const DEFAULT_KEYMAP = {
+  0: 'KeyA', 1: 'KeyW', 2: 'KeyS', 3: 'KeyE', 4: 'KeyD',
+  5: 'KeyF', 6: 'KeyR', 7: 'KeyJ', 8: 'KeyI', 9: 'KeyK',
+  10: 'KeyO', 11: 'KeyL',
 };
-const BLACK_CODE_TO_MIDI = {
-  KeyW: 61, KeyE: 63, KeyR: 66, KeyI: 68, KeyO: 70,
-};
-const CODE_TO_BASE_MIDI = { ...WHITE_CODE_TO_MIDI, ...BLACK_CODE_TO_MIDI };
-const CODE_LABEL = {
-  KeyA: 'A', KeyS: 'S', KeyD: 'D', KeyF: 'F',
-  KeyJ: 'J', KeyK: 'K', KeyL: 'L',
-  KeyW: 'W', KeyE: 'E', KeyR: 'R', KeyI: 'I', KeyO: 'O',
-};
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+// 重映射只允许字母 / 数字 / 常见标点; 拒绝 Tab/Enter/Escape/Space/方向键等
+const ALLOWED_REBIND_CODE = /^(Key[A-Z]|Digit[0-9]|Numpad[0-9]|Semicolon|Quote|Comma|Period|Slash|Minus|Equal|Backquote|Backslash|BracketLeft|BracketRight)$/;
+const KEYMAP_LS_KEY = 'playspace.keymap.v1';
+
+function loadKeymap() {
+  try {
+    const raw = localStorage.getItem(KEYMAP_LS_KEY);
+    if (!raw) return { ...DEFAULT_KEYMAP };
+    const obj = JSON.parse(raw);
+    const m = {};
+    const seen = new Set();
+    for (let i = 0; i < 12; i++) {
+      const c = obj[i];
+      if (typeof c !== 'string' || !ALLOWED_REBIND_CODE.test(c) || seen.has(c)) {
+        return { ...DEFAULT_KEYMAP };
+      }
+      m[i] = c; seen.add(c);
+    }
+    return m;
+  } catch (e) {
+    return { ...DEFAULT_KEYMAP };
+  }
+}
+function saveKeymap() {
+  try { localStorage.setItem(KEYMAP_LS_KEY, JSON.stringify(keymap)); } catch (e) {}
+}
+function invertKeymap(km) {
+  const r = {};
+  for (const [s, c] of Object.entries(km)) r[c] = +s;
+  return r;
+}
+function codeShortLabel(code) {
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Numpad')) return 'N' + code.slice(6);
+  return ({Semicolon:';',Quote:"'",Comma:',',Period:'.',Slash:'/',
+          Minus:'-',Equal:'=',Backquote:'`',Backslash:'\\',
+          BracketLeft:'[',BracketRight:']'})[code] || code;
+}
+
+let keymap = loadKeymap();
+let codeToSemitone = invertKeymap(keymap);
 
 const MIDI_TO_KEY_LABEL = {};
-// 中央八度
-for (const [code, lbl] of Object.entries(CODE_LABEL)) {
-  MIDI_TO_KEY_LABEL[CODE_TO_BASE_MIDI[code]] = lbl;
+function rebuildKeyLabels() {
+  for (const k in MIDI_TO_KEY_LABEL) delete MIDI_TO_KEY_LABEL[k];
+  for (const [s, code] of Object.entries(keymap)) {
+    const lbl = codeShortLabel(code);
+    const semi = +s;
+    MIDI_TO_KEY_LABEL[60 + semi] = lbl;            // 中央八度
+    if (!(48 + semi in MIDI_TO_KEY_LABEL)) MIDI_TO_KEY_LABEL[48 + semi] = '⌃' + lbl; // 低八度
+    if (!(72 + semi in MIDI_TO_KEY_LABEL)) MIDI_TO_KEY_LABEL[72 + semi] = '␣' + lbl; // 高八度
+  }
 }
-// 低八度 (⌃前缀)
-for (const [code, lbl] of Object.entries(CODE_LABEL)) {
-  const m = CODE_TO_BASE_MIDI[code] - 12;
-  if (!(m in MIDI_TO_KEY_LABEL)) MIDI_TO_KEY_LABEL[m] = '⌃' + lbl;
-}
-// 高八度 (␣前缀)
-for (const [code, lbl] of Object.entries(CODE_LABEL)) {
-  const m = CODE_TO_BASE_MIDI[code] + 12;
-  if (!(m in MIDI_TO_KEY_LABEL)) MIDI_TO_KEY_LABEL[m] = '␣' + lbl;
-}
+rebuildKeyLabels();
 
 let spaceHeld = false;
 const activeKeys = new Map(); // e.code -> midi (按下时算出的, 松键时不能重算)
 
 function isOurKey(e) {
-  return e.code === 'Space' || e.code in CODE_TO_BASE_MIDI;
+  return e.code === 'Space' || e.code in codeToSemitone;
 }
 
 function shouldPreventDefault(e) {
@@ -1094,7 +1222,12 @@ function maybeStealFocus(e) {
   if (ae && (ae.tagName === 'BUTTON' || ae.tagName === 'SELECT')) ae.blur();
 }
 
+function keymapModalOpen() {
+  return document.getElementById('keymap-modal').classList.contains('open');
+}
+
 window.addEventListener('keydown', (e) => {
+  if (keymapModalOpen()) return; // modal 自己接管所有按键
   if (shouldPreventDefault(e)) { e.preventDefault(); e.stopPropagation(); }
   maybeStealFocus(e);
   if (e.repeat) return;
@@ -1102,11 +1235,11 @@ window.addEventListener('keydown', (e) => {
   // Space 是纯修饰键 (升八度), 自己不发音
   if (e.code === 'Space') { spaceHeld = true; return; }
 
-  const base = CODE_TO_BASE_MIDI[e.code];
-  if (base === undefined) return;
+  const semi = codeToSemitone[e.code];
+  if (semi === undefined) return;
   if (activeKeys.has(e.code)) return;
 
-  let midi = base;
+  let midi = 60 + semi;
   if (e.ctrlKey) midi -= 12;     // Ctrl: 降一组
   if (spaceHeld) midi += 12;     // Space: 升一组 (Ctrl+Space 抵消, 回到中央)
   activeKeys.set(e.code, midi);
@@ -1116,6 +1249,7 @@ window.addEventListener('keydown', (e) => {
 }, true); // capture: 抢在按钮 / select 默认行为之前
 
 window.addEventListener('keyup', (e) => {
+  if (keymapModalOpen()) return;
   if (shouldPreventDefault(e)) { e.preventDefault(); e.stopPropagation(); }
 
   if (e.code === 'Space') { spaceHeld = false; return; }
@@ -1223,6 +1357,98 @@ btnPause.onclick = (e) => {
     btnPause.textContent = '⏸ 暂停';
   }
 };
+
+// ---------- 键位设置 ----------
+const kmModal = document.getElementById('keymap-modal');
+const kmRows = document.getElementById('km-rows');
+const btnSettings = document.getElementById('settings');
+const btnKmReset = document.getElementById('km-reset');
+const btnKmClose = document.getElementById('km-close');
+let rebindingSemitone = null; // 当前等待新按键的那一行 (0-11) 或 null
+
+function renderKmRows() {
+  kmRows.innerHTML = '';
+  for (let s = 0; s < 12; s++) {
+    const row = document.createElement('div');
+    row.className = 'km-row';
+    const note = document.createElement('span');
+    note.className = 'km-note' + (NOTE_NAMES[s].includes('#') ? ' black' : '');
+    note.textContent = NOTE_NAMES[s];
+    const btn = document.createElement('button');
+    btn.className = 'km-btn' + (rebindingSemitone === s ? ' waiting' : '');
+    btn.textContent = rebindingSemitone === s ? '按下任意键…' : codeShortLabel(keymap[s]);
+    btn.onclick = (ev) => {
+      ev.currentTarget.blur();
+      rebindingSemitone = (rebindingSemitone === s) ? null : s;
+      renderKmRows();
+    };
+    row.appendChild(note);
+    row.appendChild(btn);
+    kmRows.appendChild(row);
+  }
+}
+
+function openKeymapModal() {
+  // 进入设置时把所有按住状态清掉, 防止 modal 关闭后还有"卡住"的音
+  releaseAllHeld();
+  releaseAllPhysicalInput();
+  rebindingSemitone = null;
+  renderKmRows();
+  kmModal.classList.add('open');
+}
+function closeKeymapModal() {
+  rebindingSemitone = null;
+  kmModal.classList.remove('open');
+}
+
+btnSettings.onclick = (e) => { e.currentTarget.blur(); openKeymapModal(); };
+btnKmClose.onclick = (e) => { e.currentTarget.blur(); closeKeymapModal(); };
+btnKmReset.onclick = (e) => {
+  e.currentTarget.blur();
+  keymap = { ...DEFAULT_KEYMAP };
+  codeToSemitone = invertKeymap(keymap);
+  rebuildKeyLabels();
+  saveKeymap();
+  rebindingSemitone = null;
+  renderKmRows();
+};
+// 点遮罩空白处也关闭
+kmModal.onclick = (e) => { if (e.target === kmModal) closeKeymapModal(); };
+
+// modal 打开时, 这个 capture-phase 监听器优先消费按键事件
+window.addEventListener('keydown', (e) => {
+  if (!keymapModalOpen()) return;
+  // 焦点保护仍然要做 (Ctrl+F 等), 不然 modal 期间也会被偷焦
+  if (shouldPreventDefault(e)) { e.preventDefault(); e.stopPropagation(); }
+  // Esc: 取消等待 / 没在等待就关 modal
+  if (e.code === 'Escape') {
+    e.preventDefault(); e.stopPropagation();
+    if (rebindingSemitone !== null) { rebindingSemitone = null; renderKmRows(); }
+    else closeKeymapModal();
+    return;
+  }
+  if (rebindingSemitone === null) return; // modal 开着但没在重映射, 直接吃掉
+  e.preventDefault(); e.stopPropagation();
+  // Backspace: 把这一行清掉就退出等待 (但 keymap 必须 12 个齐全, 所以 backspace = 取消)
+  if (e.code === 'Backspace') { rebindingSemitone = null; renderKmRows(); return; }
+  // 修饰键自身按下不算
+  const mods = ['ControlLeft','ControlRight','AltLeft','AltRight',
+                'MetaLeft','MetaRight','ShiftLeft','ShiftRight','Space'];
+  if (mods.includes(e.code)) return;
+  if (!ALLOWED_REBIND_CODE.test(e.code)) return; // 拒绝 Tab/Enter/方向键 等
+  // 重映射: 若新键已被别的半音占用, 把那一格让给当前行的旧键 (交换)
+  const targetSemi = rebindingSemitone;
+  const oldCode = keymap[targetSemi];
+  for (const [s, c] of Object.entries(keymap)) {
+    if (c === e.code && +s !== targetSemi) { keymap[s] = oldCode; break; }
+  }
+  keymap[targetSemi] = e.code;
+  codeToSemitone = invertKeymap(keymap);
+  rebuildKeyLabels();
+  saveKeymap();
+  rebindingSemitone = null;
+  renderKmRows();
+}, true);
 </script>
 </body>
 </html>
