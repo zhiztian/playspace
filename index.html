@@ -1030,53 +1030,46 @@ function onMidi(ev) {
 }
 
 // 电脑键盘当 MIDI 测试 (没有电钢时也能玩):
-//   家位:        a s d f j k l ;       →  C4 D4 E4 F4 G4 A4 B4 C5  (中央八度白键)
-//   Ctrl + 同样: a s d f j k l          →  C3 D3 E3 F3 G3 A3 B3    (低八度白键)
-//   空格 + 同样: a s   f j k     ;      →  C#4 D#4 F#4 G#4 A#4 C#5 (黑键)
-//   Ctrl+空格+   a s   f j k            →  C#3 D#3 F#3 G#3 A#3     (低八度黑键)
-//   单按 空格:                          →  C5 (空格按下时本身也响 C5)
+//   白键 a s d f j k l        →  C4 D4 E4 F4 G4 A4 B4   (中央八度)
+//   黑键 w e   r   i o         →  C#4 D#4 F#4 G#4 A#4    (中央八度黑键, 跳过 E#/B#)
+//   Ctrl + 同样组合           →  C3 八度 (整体降一组)
+//   空格 + 同样组合           →  C5 八度 (整体升一组)
 // 用 e.code 而不是 e.key, 避免 Shift/CapsLock/输入法干扰映射.
 // 焦点保护: 拦截所有 Ctrl/Alt/Meta + 其他键 的组合 + Tab, 防止浏览器快捷键
 // (Ctrl+F 查找 / Ctrl+S 保存 / Ctrl+L 地址栏 / Tab 切焦点) 把焦点偷走.
 // Ctrl+W/T/N、F5、F11、F12 是浏览器/OS 级, 无法拦截.
-const CODE_TO_BASE_MIDI = {
+const WHITE_CODE_TO_MIDI = {
   KeyA: 60, KeyS: 62, KeyD: 64, KeyF: 65,
-  KeyJ: 67, KeyK: 69, KeyL: 71, Semicolon: 72,
+  KeyJ: 67, KeyK: 69, KeyL: 71,
 };
+const BLACK_CODE_TO_MIDI = {
+  KeyW: 61, KeyE: 63, KeyR: 66, KeyI: 68, KeyO: 70,
+};
+const CODE_TO_BASE_MIDI = { ...WHITE_CODE_TO_MIDI, ...BLACK_CODE_TO_MIDI };
 const CODE_LABEL = {
   KeyA: 'A', KeyS: 'S', KeyD: 'D', KeyF: 'F',
-  KeyJ: 'J', KeyK: 'K', KeyL: 'L', Semicolon: ';',
+  KeyJ: 'J', KeyK: 'K', KeyL: 'L',
+  KeyW: 'W', KeyE: 'E', KeyR: 'R', KeyI: 'I', KeyO: 'O',
 };
-// 黑键 = 该字母右侧紧邻的黑键 (升半音). E (D键) 和 B (L键) 右侧无黑键, 跳过.
-const BLACK_KEY_OFFSET = {
-  KeyA: 1, KeyS: 1, KeyF: 1, KeyJ: 1, KeyK: 1, Semicolon: 1,
-};
-// Space 单独处理: 单按 = C5, 与字母组合 = 升黑键修饰
 
 const MIDI_TO_KEY_LABEL = {};
-// 主八度白键
+// 中央八度
 for (const [code, lbl] of Object.entries(CODE_LABEL)) {
   MIDI_TO_KEY_LABEL[CODE_TO_BASE_MIDI[code]] = lbl;
 }
-MIDI_TO_KEY_LABEL[72] = MIDI_TO_KEY_LABEL[72] || '␣'; // C5 = ;/Space
-// 低八度白键 (⌃A 等); ⌃; 落在 C4 与 A 冲突, 跳过
+// 低八度 (⌃前缀)
 for (const [code, lbl] of Object.entries(CODE_LABEL)) {
   const m = CODE_TO_BASE_MIDI[code] - 12;
   if (!(m in MIDI_TO_KEY_LABEL)) MIDI_TO_KEY_LABEL[m] = '⌃' + lbl;
 }
-// 主八度黑键 (␣ = 空格符号)
-for (const [code, off] of Object.entries(BLACK_KEY_OFFSET)) {
-  MIDI_TO_KEY_LABEL[CODE_TO_BASE_MIDI[code] + off] = '␣' + CODE_LABEL[code];
-}
-// 低八度黑键 (⌃␣A 等)
-for (const [code, off] of Object.entries(BLACK_KEY_OFFSET)) {
-  const m = CODE_TO_BASE_MIDI[code] - 12 + off;
-  if (!(m in MIDI_TO_KEY_LABEL)) MIDI_TO_KEY_LABEL[m] = '⌃␣' + CODE_LABEL[code];
+// 高八度 (␣前缀)
+for (const [code, lbl] of Object.entries(CODE_LABEL)) {
+  const m = CODE_TO_BASE_MIDI[code] + 12;
+  if (!(m in MIDI_TO_KEY_LABEL)) MIDI_TO_KEY_LABEL[m] = '␣' + lbl;
 }
 
 let spaceHeld = false;
-let spaceUsedAsModifier = false; // 一旦被当作黑键修饰, Space 松开时不再补发 C5
-const activeKeys = new Map(); // e.code -> midi (按下时算出的, 松键时不能重算; Space 也用 'Space' 占位)
+const activeKeys = new Map(); // e.code -> midi (按下时算出的, 松键时不能重算)
 
 function isOurKey(e) {
   return e.code === 'Space' || e.code in CODE_TO_BASE_MIDI;
@@ -1105,35 +1098,16 @@ window.addEventListener('keydown', (e) => {
   maybeStealFocus(e);
   if (e.repeat) return;
 
-  // Space 单独处理: 按下立即响 C5, 但若随后按下字母变成黑键修饰, 则掐掉 C5
-  if (e.code === 'Space') {
-    if (spaceHeld) return;
-    spaceHeld = true;
-    spaceUsedAsModifier = false;
-    activeKeys.set('Space', 72);
-    ensureAudio();
-    noteOn(72, 0.6);
-    if (started) tryHit(72);
-    return;
-  }
+  // Space 是纯修饰键 (升八度), 自己不发音
+  if (e.code === 'Space') { spaceHeld = true; return; }
 
   const base = CODE_TO_BASE_MIDI[e.code];
   if (base === undefined) return;
   if (activeKeys.has(e.code)) return;
 
-  // Space + 字母: 第一次组合时, 把刚刚 Space 触发的 C5 取消掉
-  if (spaceHeld && BLACK_KEY_OFFSET[e.code] && !spaceUsedAsModifier) {
-    spaceUsedAsModifier = true;
-    if (activeKeys.has('Space')) {
-      const cancelMidi = activeKeys.get('Space');
-      activeKeys.delete('Space');
-      noteOff(cancelMidi);
-    }
-  }
-
   let midi = base;
-  if (e.ctrlKey) midi -= 12;
-  if (spaceHeld && BLACK_KEY_OFFSET[e.code]) midi += BLACK_KEY_OFFSET[e.code];
+  if (e.ctrlKey) midi -= 12;     // Ctrl: 降一组
+  if (spaceHeld) midi += 12;     // Space: 升一组 (Ctrl+Space 抵消, 回到中央)
   activeKeys.set(e.code, midi);
   ensureAudio();
   noteOn(midi, 0.6);
@@ -1143,16 +1117,7 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => {
   if (shouldPreventDefault(e)) { e.preventDefault(); e.stopPropagation(); }
 
-  if (e.code === 'Space') {
-    spaceHeld = false;
-    spaceUsedAsModifier = false;
-    if (activeKeys.has('Space')) {
-      const m = activeKeys.get('Space');
-      activeKeys.delete('Space');
-      noteOff(m);
-    }
-    return;
-  }
+  if (e.code === 'Space') { spaceHeld = false; return; }
 
   const midi = activeKeys.get(e.code);
   if (midi === undefined) return;
@@ -1162,7 +1127,6 @@ window.addEventListener('keyup', (e) => {
 
 function releaseAllPhysicalInput() {
   spaceHeld = false;
-  spaceUsedAsModifier = false;
   for (const midi of activeKeys.values()) noteOff(midi);
   activeKeys.clear();
 }
