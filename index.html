@@ -490,8 +490,8 @@ function draw() {
     ctx.fillRect(cx0, cy0 + ch * 0.7, cw, ch * 0.3);
     ctx.restore();
 
-    // 字母
-    const fontSize = Math.round(cw * 0.55);
+    // 字母 (双字符如 "⌃A" 缩小字号以放下)
+    const fontSize = Math.round(cw * (label.length > 1 ? 0.40 : 0.55));
     ctx.font = `700 ${fontSize}px ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -1003,18 +1003,56 @@ function onMidi(ev) {
   }
 }
 
-// 键盘当 MIDI 测试 (没有电钢时也能玩): A S D F G H J = C D E F G A B
-const KEY_MAP = { a: 60, w: 61, s: 62, e: 63, d: 64, f: 65, t: 66, g: 67, y: 68, h: 69, u: 70, j: 71, k: 72 };
+// 电脑键盘当 MIDI 测试 (没有电钢时也能玩):
+//   家位:   a s d f j k l ;  →  C4 D4 E4 F4 G4 A4 B4 C5  (中央八度 8 个白键)
+//   Ctrl+: 同样的键           →  C3 D3 E3 F3 G3 A3 B3 C4  (低八度)
+//   空格:                     →  C5  (高音 C 快捷键)
+// 用 e.code 而不是 e.key, 避免 Shift/CapsLock/输入法干扰映射.
+// 全部按键都 preventDefault, 抑制浏览器快捷键 (Ctrl+S 保存, Ctrl+A 全选,
+// Ctrl+J 下载, Ctrl+L 地址栏, Space 滚动等). Ctrl+W/T/N 等不可拦截的不在映射中.
+const CODE_TO_BASE_MIDI = {
+  KeyA: 60, KeyS: 62, KeyD: 64, KeyF: 65,
+  KeyJ: 67, KeyK: 69, KeyL: 71, Semicolon: 72,
+  Space: 72,
+};
+const CODE_LABEL = {
+  KeyA: 'A', KeyS: 'S', KeyD: 'D', KeyF: 'F',
+  KeyJ: 'J', KeyK: 'K', KeyL: 'L', Semicolon: ';',
+};
+
 const MIDI_TO_KEY_LABEL = {};
-for (const [k, m] of Object.entries(KEY_MAP)) MIDI_TO_KEY_LABEL[m] = k.toUpperCase();
+for (const [code, lbl] of Object.entries(CODE_LABEL)) {
+  MIDI_TO_KEY_LABEL[CODE_TO_BASE_MIDI[code]] = lbl;
+}
+// 低八度标签; Ctrl+; 落在 C4 已被 A 占用, 跳过避免覆盖
+for (const [code, lbl] of Object.entries(CODE_LABEL)) {
+  const m = CODE_TO_BASE_MIDI[code] - 12;
+  if (!(m in MIDI_TO_KEY_LABEL)) MIDI_TO_KEY_LABEL[m] = '⌃' + lbl;
+}
+
+// 按物理键跟踪正在发声的音 — 用户可能在按住 A 的时候松开 Ctrl,
+// 此时再 keyup KeyA 必须释放最初按下时算出的那个 MIDI, 不能重新算.
+const activeKeys = new Map(); // e.code -> midi
+
 window.addEventListener('keydown', (e) => {
-  const m = KEY_MAP[e.key]; if (!m || e.repeat) return;
+  const base = CODE_TO_BASE_MIDI[e.code];
+  if (base === undefined) return;
+  e.preventDefault();
+  if (e.repeat) return;
+  if (activeKeys.has(e.code)) return;
+  // Space 不响应 Ctrl 修饰; 其他键 Ctrl 按下 → 低一八度
+  const midi = (e.code !== 'Space' && e.ctrlKey) ? base - 12 : base;
+  activeKeys.set(e.code, midi);
   ensureAudio();
-  pressed.add(m); audioOn(m, 0.6); if (started) tryHit(m);
+  pressed.add(midi); audioOn(midi, 0.6);
+  if (started) tryHit(midi);
 });
 window.addEventListener('keyup', (e) => {
-  const m = KEY_MAP[e.key]; if (!m) return;
-  pressed.delete(m); audioOff(m);
+  const midi = activeKeys.get(e.code);
+  if (midi === undefined) return;
+  e.preventDefault();
+  activeKeys.delete(e.code);
+  pressed.delete(midi); audioOff(midi);
 });
 
 // ---------- 开始 / 暂停 / 重新开始 ----------
