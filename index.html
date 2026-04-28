@@ -1037,7 +1037,8 @@ function onMidi(ev) {
 // 用 e.code 而不是 e.key, 避免 Shift/CapsLock/输入法干扰映射.
 // 焦点保护: 拦截所有 Ctrl/Alt/Meta + 其他键 的组合 + Tab, 防止浏览器快捷键
 // (Ctrl+F 查找 / Ctrl+S 保存 / Ctrl+L 地址栏 / Tab 切焦点) 把焦点偷走.
-// Ctrl+W/T/N、F5、F11、F12 是浏览器/OS 级, 无法拦截.
+// Ctrl+W/T/N、F5、F11、F12 是浏览器/OS 级 keydown 拦不住,
+// 但 Ctrl+W / Ctrl+R / 关 tab / 后退 都会触发 beforeunload, 在那里弹原生确认框.
 const WHITE_CODE_TO_MIDI = {
   KeyA: 60, KeyS: 62, KeyD: 64, KeyF: 65,
   KeyJ: 67, KeyK: 69, KeyL: 71,
@@ -1134,6 +1135,14 @@ function releaseAllPhysicalInput() {
 window.addEventListener('blur', releaseAllPhysicalInput);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) releaseAllPhysicalInput();
+});
+
+// 浏览器级快捷键 (Ctrl+W 关 tab / Ctrl+R 刷新 / Ctrl+N 开窗口 / Alt+左 后退) 没法
+// 在 keydown 里 preventDefault 拦住, 但能在窗口真要卸载的瞬间弹一个原生确认框.
+// 用户实际有意要走时点一下"离开"即可, 误触 Ctrl+W (打算弹 C#3) 就被这里救回来.
+window.addEventListener('beforeunload', (e) => {
+  e.preventDefault();
+  e.returnValue = ''; // Chrome 要求显式赋值才弹框
 });
 
 // ---------- 开始 / 暂停 / 重新开始 ----------
