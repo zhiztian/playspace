@@ -247,7 +247,7 @@
       <button id="km-reset">恢复默认</button>
       <button id="km-close">关闭</button>
     </div>
-    <p class="km-hint">点击右侧按钮 → 按下你想绑定的键 (Esc 取消, Backspace 清除)</p>
+    <p class="km-hint">点击右侧按钮 → 按下你想绑定的键 (Esc / Backspace 取消)</p>
     <p class="km-hint">修饰键固定: Ctrl = 降一组 (C3), 空格 = 升一组 (C5)</p>
   </div>
 </div>
@@ -1117,6 +1117,7 @@ function onMidi(ev) {
   const [status, data1, data2] = ev.data;
   const cmd = status & 0xf0;
   if (cmd === 0x90 && data2 > 0) { // note on
+    if (!midiInRange(data1)) return; // 超出谱面范围的键不算 miss / 不发声
     noteOn(data1, data2 / 127);
     if (started) tryHit(data1);
   } else if (cmd === 0x80 || (cmd === 0x90 && data2 === 0)) { // note off
@@ -1266,9 +1267,14 @@ function releaseAllPhysicalInput() {
   activeKeys.clear();
 }
 // Alt-Tab 出去 / 标签页隐藏时, 所有按住状态都不可信, 一律松开
-window.addEventListener('blur', releaseAllPhysicalInput);
+// (含 Yamaha note-on 之后我们没收到 note-off 的情况, 一并放掉)
+function releaseAllOnAway() {
+  releaseAllPhysicalInput();
+  releaseAllHeld();
+}
+window.addEventListener('blur', releaseAllOnAway);
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) releaseAllPhysicalInput();
+  if (document.hidden) releaseAllOnAway();
 });
 
 // 浏览器级快捷键 (Ctrl+W 关 tab / Ctrl+R 刷新 / Ctrl+N 开窗口 / Alt+左 后退) 没法
@@ -1392,6 +1398,8 @@ function openKeymapModal() {
   // 进入设置时把所有按住状态清掉, 防止 modal 关闭后还有"卡住"的音
   releaseAllHeld();
   releaseAllPhysicalInput();
+  // 设置面板期间游戏时钟会继续走, 玩家全是 miss; 自动按下"暂停" (开着的话)
+  if (started && !paused) btnPause.click();
   rebindingSemitone = null;
   renderKmRows();
   kmModal.classList.add('open');
@@ -1419,7 +1427,8 @@ kmModal.onclick = (e) => { if (e.target === kmModal) closeKeymapModal(); };
 window.addEventListener('keydown', (e) => {
   if (!keymapModalOpen()) return;
   // 焦点保护仍然要做 (Ctrl+F 等), 不然 modal 期间也会被偷焦
-  if (shouldPreventDefault(e)) { e.preventDefault(); e.stopPropagation(); }
+  // 但放过 Tab — modal 内的"恢复默认/关闭"按钮要靠它焦点切换
+  if (e.code !== 'Tab' && shouldPreventDefault(e)) { e.preventDefault(); e.stopPropagation(); }
   // Esc: 取消等待 / 没在等待就关 modal
   if (e.code === 'Escape') {
     e.preventDefault(); e.stopPropagation();
